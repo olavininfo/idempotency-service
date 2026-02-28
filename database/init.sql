@@ -1,40 +1,46 @@
 -- =============================================================
 -- 幂等服务数据库初始化 SQL
--- 数据库：n8n_workflow_data
+-- 数据库：任意已有 PostgreSQL 数据库
+-- Schema：idempotency（独立 schema，与业务表隔离）
 -- 版本：v1.0  日期：2026-02-28
 -- 说明：在目标数据库中直接执行此脚本完成全部初始化
 -- =============================================================
 
+-- 0. 创建独立 Schema（如已存在则跳过）
+-- =============================================================
+CREATE SCHEMA IF NOT EXISTS idempotency;
+
+-- 将 schema 权限授予微服务用户（按实际用户名替换）
+-- GRANT ALL ON SCHEMA idempotency TO n8nworkflow;
+-- GRANT ALL ON ALL TABLES IN SCHEMA idempotency TO n8nworkflow;
+-- GRANT ALL ON ALL SEQUENCES IN SCHEMA idempotency TO n8nworkflow;
+-- GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA idempotency TO n8nworkflow;
+
 -- 1. 创建幂等记录主表
 -- =============================================================
-CREATE TABLE IF NOT EXISTS idempotency_keys (
+CREATE TABLE IF NOT EXISTS idempotency.idempotency_keys (
     id                  BIGSERIAL       PRIMARY KEY,
-    scope               VARCHAR(128)    NOT NULL,           -- 业务场景名（如 "order_process"）
-    idempotency_key     VARCHAR(255)    NOT NULL,           -- 唯一业务 ID（如 "order-123"）
-    status              VARCHAR(32)     NOT NULL            -- PROCESSING / DONE / FAILED / CONFLICT
-                            DEFAULT 'PROCESSING',
-    payload_fingerprint VARCHAR(64)     NOT NULL DEFAULT '', -- 请求内容 hash（可选，用于防篡改）
-    attempt_count       INTEGER         NOT NULL DEFAULT 0,  -- 已尝试次数
-    lock_expires_at     TIMESTAMPTZ,                         -- 锁过期时间（PROCESSING 时有值）
-    next_retry_at       TIMESTAMPTZ,                         -- 下次重试时间（FAILED 时有值）
-    last_error          TEXT,                                -- 最后一次错误信息（最多 4000 字符）
-    last_error_at       TIMESTAMPTZ,                         -- 最后一次错误时间
+    scope               VARCHAR(128)    NOT NULL,
+    idempotency_key     VARCHAR(255)    NOT NULL,
+    status              VARCHAR(32)     NOT NULL            DEFAULT 'PROCESSING',
+    payload_fingerprint VARCHAR(64)     NOT NULL DEFAULT '',
+    attempt_count       INTEGER         NOT NULL DEFAULT 0,
+    lock_expires_at     TIMESTAMPTZ,
+    next_retry_at       TIMESTAMPTZ,
+    last_error          TEXT,
+    last_error_at       TIMESTAMPTZ,
     created_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
-
-    -- 同一 scope 下 idempotency_key 全局唯一
     CONSTRAINT uq_idempotency_scope_key UNIQUE (scope, idempotency_key)
 );
 
 -- 2. 索引
 -- =============================================================
--- 主查询索引：按 scope+key 查找
 CREATE INDEX IF NOT EXISTS idx_idempotency_scope_key
-    ON idempotency_keys (scope, idempotency_key);
+    ON idempotency.idempotency_keys (scope, idempotency_key);
 
--- Recovery 扫描索引：快速找到需要自愈的记录
 CREATE INDEX IF NOT EXISTS idx_idempotency_recovery
-    ON idempotency_keys (status, lock_expires_at, next_retry_at)
+    ON idempotency.idempotency_keys (status, lock_expires_at, next_retry_at)
     WHERE status IN ('PROCESSING', 'FAILED');
 
 -- 3. 核心函数：idempotency_acquire()

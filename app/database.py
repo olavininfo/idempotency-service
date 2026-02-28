@@ -12,6 +12,7 @@ _pool: pool.ThreadedConnectionPool | None = None
 
 async def init_pool() -> None:
     global _pool
+    db_schema = os.getenv("DB_SCHEMA", "idempotency")
     _pool = psycopg2.pool.ThreadedConnectionPool(
         minconn=1,
         maxconn=10,
@@ -20,8 +21,9 @@ async def init_pool() -> None:
         dbname=os.getenv("DB_NAME", "n8n_workflow_data"),
         user=os.getenv("DB_USER", "n8nworkflow"),
         password=os.getenv("DB_PASSWORD", ""),
+        options=f"-c search_path={db_schema}",   # 自动指向指定 schema
     )
-    logger.info("Database connection pool initialized")
+    logger.info(f"Database connection pool initialized (schema: {db_schema})")
 
 
 async def close_pool() -> None:

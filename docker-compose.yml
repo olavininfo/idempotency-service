@@ -1,0 +1,21 @@
+# VPS 部署配置文件
+# 放置路径：/opt/idempotency-service/docker-compose.yml
+#
+# 使用说明：
+# 1. 将此文件和 .env 文件放到 VPS 的 /opt/idempotency-service/ 目录
+# 2. 修改 networks 中的 external name 为实际的 Docker 网络名
+# 3. 执行：docker compose up -d
+
+services:
+  idempotency-service:
+    image: ghcr.io/olavininfo/idempotency-service:latest
+    container_name: idempotency-service
+    restart: unless-stopped
+    env_file: .env
+    networks:
+      - caddy-network # 替换为实际的 Docker 网络名（n8n 所在网络）
+
+networks:
+  caddy-network:
+    external: true # 使用已存在的外部网络
+    # name: caddy-network      # 如果网络名称与 key 不同，取消注释并填写实际名称
