@@ -8,6 +8,8 @@ WORKDIR /app
 
 # 先装依赖（利用 Docker layer cache，代码改变时不重装包）
 COPY requirements.txt .
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制应用代码

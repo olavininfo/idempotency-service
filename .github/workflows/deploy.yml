@@ -45,9 +45,9 @@ jobs:
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u olavininfo --password-stdin
             # 拉取最新镜像
             docker pull ghcr.io/olavininfo/idempotency-service:latest
-            # 重启或启动服务
-            cd /opt
-            docker compose up -d --no-deps idempotency-service
-            # 等待启动并健康检查
+            # 重启服务（compose 文件在 /opt/idempotency-service/）
+            cd /opt/idempotency-service
+            docker compose up -d --force-recreate
+            # 等待启动并从容器内健康检查
             sleep 5
-            curl -f http://localhost:8080/health || echo "Health check failed, check logs"
+            docker exec idempotency-service curl -sf http://localhost:8080/health || echo "Health check failed, check logs"
