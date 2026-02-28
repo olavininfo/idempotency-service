@@ -45,8 +45,8 @@ jobs:
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u olavininfo --password-stdin
             # 拉取最新镜像
             docker pull ghcr.io/olavininfo/idempotency-service:latest
-            # 重启服务（compose 文件在 /opt/idempotency-service/）
-            cd /opt/idempotency-service
+            # 重启服务（compose 文件在 /data/stacks/workflow/idempotency-service/）
+            cd /data/stacks/workflow/idempotency-service
             docker compose up -d --force-recreate
             # 等待启动并从容器内健康检查
             sleep 5
