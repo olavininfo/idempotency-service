@@ -1,0 +1,245 @@
+{
+    "name": "幂等保护测试工作流",
+    "nodes": [
+        {
+            "parameters": {},
+            "id": "11111111-0001-0001-0001-000000000001",
+            "name": "手动触发",
+            "type": "n8n-nodes-base.manualTrigger",
+            "typeVersion": 1,
+            "position": [
+                200,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "assignments": {
+                    "assignments": [
+                        {
+                            "id": "f001",
+                            "name": "scope",
+                            "value": "test_workflow",
+                            "type": "string"
+                        },
+                        {
+                            "id": "f002",
+                            "name": "idempotency_key",
+                            "value": "order-001",
+                            "type": "string"
+                        },
+                        {
+                            "id": "f003",
+                            "name": "ttl_seconds",
+                            "value": 900,
+                            "type": "number"
+                        },
+                        {
+                            "id": "f004",
+                            "name": "max_attempts",
+                            "value": 3,
+                            "type": "number"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "11111111-0002-0002-0002-000000000002",
+            "name": "设置请求参数",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3,
+            "position": [
+                420,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "http://idempotency-service:8080/acquire",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={{ JSON.stringify({ scope: $json.scope, idempotency_key: $json.idempotency_key, ttl_seconds: $json.ttl_seconds, max_attempts: $json.max_attempts }) }}",
+                "options": {}
+            },
+            "id": "11111111-0003-0003-0003-000000000003",
+            "name": "幂等 Acquire",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                640,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "string": [
+                        {
+                            "value1": "={{ $json.decision }}",
+                            "operation": "equals",
+                            "value2": "PROCEED"
+                        }
+                    ]
+                }
+            },
+            "id": "11111111-0004-0004-0004-000000000004",
+            "name": "是否允许执行",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 1,
+            "position": [
+                860,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "assignments": {
+                    "assignments": [
+                        {
+                            "id": "f005",
+                            "name": "business_result",
+                            "value": "订单处理成功！（此处替换为你的真实业务节点）",
+                            "type": "string"
+                        },
+                        {
+                            "id": "f006",
+                            "name": "order_id",
+                            "value": "order-001",
+                            "type": "string"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "11111111-0005-0005-0005-000000000005",
+            "name": "执行业务逻辑",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3,
+            "position": [
+                1080,
+                200
+            ]
+        },
+        {
+            "parameters": {
+                "method": "POST",
+                "url": "http://idempotency-service:8080/complete",
+                "sendBody": true,
+                "specifyBody": "json",
+                "jsonBody": "={ \"scope\": \"test_workflow\", \"idempotency_key\": \"order-001\", \"final_status\": \"DONE\" }",
+                "options": {}
+            },
+            "id": "11111111-0006-0006-0006-000000000006",
+            "name": "幂等 Complete DONE",
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [
+                1300,
+                200
+            ]
+        },
+        {
+            "parameters": {
+                "assignments": {
+                    "assignments": [
+                        {
+                            "id": "f007",
+                            "name": "skipped",
+                            "value": true,
+                            "type": "boolean"
+                        },
+                        {
+                            "id": "f008",
+                            "name": "decision",
+                            "value": "={{ $json.decision }}",
+                            "type": "string"
+                        },
+                        {
+                            "id": "f009",
+                            "name": "message",
+                            "value": "={{ '幂等保护已跳过执行，原因：' + $json.decision }}",
+                            "type": "string"
+                        }
+                    ]
+                },
+                "options": {}
+            },
+            "id": "11111111-0007-0007-0007-000000000007",
+            "name": "跳过（幂等保护）",
+            "type": "n8n-nodes-base.set",
+            "typeVersion": 3,
+            "position": [
+                1080,
+                400
+            ]
+        }
+    ],
+    "connections": {
+        "手动触发": {
+            "main": [
+                [
+                    {
+                        "node": "设置请求参数",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "设置请求参数": {
+            "main": [
+                [
+                    {
+                        "node": "幂等 Acquire",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "幂等 Acquire": {
+            "main": [
+                [
+                    {
+                        "node": "是否允许执行",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "是否允许执行": {
+            "main": [
+                [
+                    {
+                        "node": "执行业务逻辑",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "跳过（幂等保护）",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "执行业务逻辑": {
+            "main": [
+                [
+                    {
+                        "node": "幂等 Complete DONE",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    }
+}

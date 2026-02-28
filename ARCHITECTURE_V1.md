@@ -224,6 +224,8 @@ idempotency-service/          ← 本地开发目录（Windows: d:\n8n skill\ide
 ├── requirements.txt          ← fastapi, uvicorn, psycopg2-binary, apscheduler, requests
 ├── README.md
 ├── n8n_test_workflow.json    ← n8n 测试工作流导入文件
+├── database/
+│   └── init.sql              ← 完整数据库初始化 SQL（新 VPS 部署用）
 └── .github/
     └── workflows/
         └── deploy.yml        ← GitHub Actions CI/CD
@@ -366,3 +368,201 @@ DELETE FROM idempotency_keys WHERE idempotency_key = 'order-001';
 | 版本 | 日期 | 说明 |
 |------|------|------|
 | v1.0 | 2026-02-28 | 初始版本：FastAPI + Docker + GitHub Actions CI/CD，接入 n8n |
+
+---
+
+## 11. 在新 VPS 上部署数据库（完整 SQL）
+
+> 完整 SQL 文件位置：`database/init.sql`  
+> 在新环境部署时，需先准备好 PostgreSQL 数据库，然后执行此 SQL。
+
+### 第一步：创建数据库和用户（如尚未存在）
+
+```sql
+-- 在 PostgreSQL superuser 下执行
+CREATE DATABASE n8n_workflow_data;
+CREATE USER n8nworkflow WITH PASSWORD 'your_password_here';
+GRANT ALL PRIVILEGES ON DATABASE n8n_workflow_data TO n8nworkflow;
+\c n8n_workflow_data
+GRANT ALL ON SCHEMA public TO n8nworkflow;
+```
+
+### 第二步：创建主表
+
+```sql
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    id                  BIGSERIAL       PRIMARY KEY,
+    scope               VARCHAR(128)    NOT NULL,
+    idempotency_key     VARCHAR(255)    NOT NULL,
+    status              VARCHAR(32)     NOT NULL DEFAULT 'PROCESSING',
+    payload_fingerprint VARCHAR(64)     NOT NULL DEFAULT '',
+    attempt_count       INTEGER         NOT NULL DEFAULT 0,
+    lock_expires_at     TIMESTAMPTZ,
+    next_retry_at       TIMESTAMPTZ,
+    last_error          TEXT,
+    last_error_at       TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    CONSTRAINT uq_idempotency_scope_key UNIQUE (scope, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_idempotency_scope_key
+    ON idempotency_keys (scope, idempotency_key);
+
+CREATE INDEX IF NOT EXISTS idx_idempotency_recovery
+    ON idempotency_keys (status, lock_expires_at, next_retry_at)
+    WHERE status IN ('PROCESSING', 'FAILED');
+```
+
+### 第三步：创建核心函数（含完整并发安全逻辑）
+
+```sql
+CREATE OR REPLACE FUNCTION idempotency_acquire(
+    p_scope               VARCHAR,
+    p_idempotency_key     VARCHAR,
+    p_payload_fingerprint VARCHAR,
+    p_ttl_seconds         INTEGER,
+    p_max_attempts        INTEGER
+)
+RETURNS TABLE (
+    decision        VARCHAR,
+    attempt_count   INTEGER,
+    lock_expires_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_record        idempotency_keys%ROWTYPE;
+    v_lock_expires  TIMESTAMPTZ;
+    v_decision      VARCHAR;
+    v_attempt_count INTEGER;
+BEGIN
+    SELECT * INTO v_record
+    FROM idempotency_keys
+    WHERE idempotency_keys.scope           = p_scope
+      AND idempotency_keys.idempotency_key = p_idempotency_key
+    FOR UPDATE SKIP LOCKED;
+
+    -- 场景1：首次执行
+    IF NOT FOUND THEN
+        v_lock_expires  := now() + (p_ttl_seconds || ' seconds')::INTERVAL;
+        v_attempt_count := 1;
+        INSERT INTO idempotency_keys (
+            scope, idempotency_key, status,
+            payload_fingerprint, attempt_count,
+            lock_expires_at, created_at, updated_at
+        ) VALUES (
+            p_scope, p_idempotency_key, 'PROCESSING',
+            p_payload_fingerprint, v_attempt_count,
+            v_lock_expires, now(), now()
+        );
+        RETURN QUERY SELECT 'PROCEED'::VARCHAR, v_attempt_count, v_lock_expires;
+        RETURN;
+    END IF;
+
+    -- 场景2：其他进程持锁（SKIP LOCKED 未拿到）
+    IF v_record.id IS NULL THEN
+        RETURN QUERY SELECT 'RETRY_LATER'::VARCHAR, 0, NULL::TIMESTAMPTZ;
+        RETURN;
+    END IF;
+
+    -- 场景3：已成功完成
+    IF v_record.status = 'DONE' THEN
+        RETURN QUERY SELECT 'SKIP_ALREADY_DONE'::VARCHAR, v_record.attempt_count, NULL::TIMESTAMPTZ;
+        RETURN;
+    END IF;
+
+    -- 场景4：payload 不一致（数据冲突）
+    IF p_payload_fingerprint != ''
+       AND v_record.payload_fingerprint != ''
+       AND v_record.payload_fingerprint != p_payload_fingerprint THEN
+        RETURN QUERY SELECT 'CONFLICT'::VARCHAR, v_record.attempt_count, NULL::TIMESTAMPTZ;
+        RETURN;
+    END IF;
+
+    -- 场景5：超过最大重试次数
+    IF v_record.attempt_count >= p_max_attempts THEN
+        RETURN QUERY SELECT 'RETRY_LATER'::VARCHAR, v_record.attempt_count, NULL::TIMESTAMPTZ;
+        RETURN;
+    END IF;
+
+    -- 场景6：PROCESSING 且锁未过期（正在处理中）
+    IF v_record.status = 'PROCESSING'
+       AND v_record.lock_expires_at IS NOT NULL
+       AND v_record.lock_expires_at > now() THEN
+        RETURN QUERY SELECT 'RETRY_LATER'::VARCHAR, v_record.attempt_count, v_record.lock_expires_at;
+        RETURN;
+    END IF;
+
+    -- 场景7：FAILED 且重试时间未到
+    IF v_record.status = 'FAILED'
+       AND v_record.next_retry_at IS NOT NULL
+       AND v_record.next_retry_at > now() THEN
+        RETURN QUERY SELECT 'RETRY_LATER'::VARCHAR, v_record.attempt_count, NULL::TIMESTAMPTZ;
+        RETURN;
+    END IF;
+
+    -- 场景8：锁过期或已到重试时间 → 重新执行
+    v_attempt_count := v_record.attempt_count + 1;
+    v_lock_expires  := now() + (p_ttl_seconds || ' seconds')::INTERVAL;
+    UPDATE idempotency_keys
+    SET status              = 'PROCESSING',
+        attempt_count       = v_attempt_count,
+        lock_expires_at     = v_lock_expires,
+        next_retry_at       = NULL,
+        payload_fingerprint = CASE
+                                WHEN p_payload_fingerprint != '' THEN p_payload_fingerprint
+                                ELSE payload_fingerprint
+                              END,
+        updated_at          = now()
+    WHERE idempotency_keys.scope           = p_scope
+      AND idempotency_keys.idempotency_key = p_idempotency_key;
+
+    RETURN QUERY SELECT 'PROCEED'::VARCHAR, v_attempt_count, v_lock_expires;
+END;
+$$;
+```
+
+### 第四步：创建清理工具函数
+
+```sql
+-- 清理 N 天前已完成的记录（默认 30 天）
+CREATE OR REPLACE FUNCTION idempotency_cleanup(p_days_old INTEGER DEFAULT 30)
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE v_deleted INTEGER;
+BEGIN
+    DELETE FROM idempotency_keys
+    WHERE status = 'DONE'
+      AND updated_at < now() - (p_days_old || ' days')::INTERVAL;
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    RETURN v_deleted;
+END;
+$$;
+```
+
+### 第五步：验证安装
+
+```sql
+-- 应返回 0
+SELECT COUNT(*) FROM idempotency_keys;
+
+-- 应返回 decision=PROCEED
+SELECT * FROM idempotency_acquire('test', 'verify-001', '', 900, 3);
+
+-- 应看到一条 PROCESSING 记录
+SELECT * FROM idempotency_keys WHERE idempotency_key = 'verify-001';
+
+-- 清理测试数据
+DELETE FROM idempotency_keys WHERE idempotency_key = 'verify-001';
+```
+
+### 快速执行（在 VPS 数据库容器中一键执行）
+
+```bash
+# 将 init.sql 复制到容器并执行
+docker cp database/init.sql n8n-workflow-postgres:/tmp/init.sql
+docker exec -it n8n-workflow-postgres \
+  psql -U n8nworkflow -d n8n_workflow_data -f /tmp/init.sql
+```
